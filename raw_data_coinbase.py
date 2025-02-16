@@ -32,7 +32,8 @@ def get_coinbase_historical(symbol, start_date, end_date):
 
         # Coinbase Pro API uses 'granularity' instead of 'timeframe'
         # 1 day = 86400 seconds
-        granularity = 86400
+        # 1 hour = 3600 seconds
+        granularity = 3600
 
         while current_date <= end_datetime:
             # Coinbase Pro API expects timestamps in seconds (not milliseconds)
@@ -41,7 +42,7 @@ def get_coinbase_historical(symbol, start_date, end_date):
 
             try:
                 # Fetch historical data.  Coinbase Pro API has a max of 300 candles per request.
-                ohlcv = coinbasepro.fetch_ohlcv(symbol, timeframe='1d', since=start_timestamp * 1000, limit=300)
+                ohlcv = coinbasepro.fetch_ohlcv(symbol, timeframe='1h', since=start_timestamp * 1000, limit=300)
 
                 if ohlcv:
                     ohlcv_data.extend(ohlcv)
@@ -51,7 +52,7 @@ def get_coinbase_historical(symbol, start_date, end_date):
 
                 else:
                     # No data for this day, move to the next
-                    current_date += datetime.timedelta(days=1)
+                    current_date += datetime.timedelta(hours=1)
 
             except ccxt.RequestTimeout:
                 print(f"Request timeout for {symbol} on {current_date.strftime('%Y-%m-%d')}, retrying...")

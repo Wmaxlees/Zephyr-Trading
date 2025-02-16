@@ -51,6 +51,24 @@ def split_data(data_dict, train_ratio=0.8):
     return train_data_dict, val_data_dict
 
 
+class PositionalEmbedding(tf.keras.layers.Layer):
+    def __init__(self, sequence_length, embedding_dim):
+        super().__init__()
+        self.token_embeddings = tf.keras.layers.Identity() # No token embeddings in this case, input is already numerical features
+        self.position_embeddings = tf.keras.layers.Embedding(
+            input_dim=sequence_length,
+            output_dim=embedding_dim
+        )
+        self.sequence_length = sequence_length
+        self.embedding_dim = embedding_dim
+
+    def call(self, inputs):
+        length = tf.shape(inputs)[1] # Get sequence length from input dynamically
+        positions = tf.range(start=0, limit=length, delta=1)
+        embedded_positions = self.position_embeddings(positions)
+        return inputs + embedded_positions # Add position embeddings to input
+
+
 class CryptoTradingEnvironment:
     def __init__(self, data, initial_capital=1000, n_days=5):
         self.data = data # Preprocessed data
@@ -197,8 +215,11 @@ class CryptoTradingEnvironment:
             next_portfolio_value += self.holdings[coin] * next_price
 
         # 5. Calculate reward (log return)
+        reward = 0.0
+        if next_portfolio_value > 0:
+            reward = np.log(current_portfolio_value / next_portfolio_value)
         # reward = np.maximum(0, next_portfolio_value - current_portfolio_value)
-        reward = (current_portfolio_value - next_portfolio_value) / current_portfolio_value
+        # reward = (current_portfolio_value - next_portfolio_value) / current_portfolio_value
 
         # 6. Check if episode is done
         done = self.current_step >= len(list(self.data.values())[0]) - 1 or next_portfolio_value == 0
@@ -224,45 +245,124 @@ class PPOAgent:
         self.action_dim = action_dim
         self.actor_model = self._build_actor_model()
         self.critic_model = self._build_critic_model()
-        self.optimizer_actor = tf.keras.optimizers.Adam(learning_rate=1e-6) # Tune LR
-        self.optimizer_critic = tf.keras.optimizers.Adam(learning_rate=1e-6) # Tune LR
+        self.optimizer_actor = tf.keras.optimizers.Adam(learning_rate=1e-3) # Tune LR
+        self.optimizer_critic = tf.keras.optimizers.Adam(learning_rate=1e-3) # Tune LR
         self.clip_param = 0.2 # PPO clip parameter - Tune
 
     def _build_actor_model(self):
         """
-        Builds the actor neural network (policy network).
-        Include attention layers, recurrent layers if desired.
+        Builds the actor neural network with a Transformer Encoder layer and Positional Embeddings.
         """
-        state_input_layer = tf.keras.layers.Input(shape=self.state_dim)
         hist_input_layer = tf.keras.layers.Input(shape=self.hist_dim)
-        flattened = tf.keras.layers.Flatten()(hist_input_layer)
-        # --- Implement actor network architecture with attention, recurrent layers ---
-        dense1 = tf.keras.layers.Dense(64, activation='relu')(state_input_layer)
-        dense2 = tf.keras.layers.Dense(64, activation='relu')(dense1)
-        dense3 = tf.keras.layers.Dense(64, activation='relu')(flattened)
-        concated = tf.keras.layers.concatenate([dense2, dense3], axis=1)
-        dense4 = tf.keras.layers.Dense(64, activation='relu')(concated)
-        # Output layer for mean and stddev of actions (continuous action space)
-        mean_output = tf.keras.layers.Dense(self.action_dim, activation='softmax')(dense4) # Tanh for bounded actions
-        stddev_output = tf.keras.layers.Dense(self.action_dim, activation=lambda x: tf.nn.softplus(x) + 1e-8)(dense4) # Softplus for positive stddev
+        state_input_layer = tf.keras.layers.Input(shape=self.state_dim)
+        time_steps = self.hist_dim[0]
+        num_features = self.hist_dim[1]
+
+        # --- Positional Embedding Layer ---
+        positional_embedding_layer = PositionalEmbedding(
+            sequence_length=time_steps, embedding_dim=num_features # Embedding dim matches feature dimension
+        )
+        x = positional_embedding_layer(hist_input_layer) # Apply positional embeddings
+
+        # --- Transformer Encoder Block ---
+        # Parameters for the Transformer Encoder
+        head_size = num_features  # Number of features, can be adjusted
+        num_heads = 2   # Number of attention heads
+        ff_dim = 64     # Hidden layer size in feed forward network
+
+        # Layer Normalization and Multi-Head Attention
+        x = tf.keras.layers.LayerNormalization(epsilon=1e-6)(x)
+        attn_output = tf.keras.layers.MultiHeadAttention(
+            key_dim=head_size, num_heads=num_heads, dropout=0.1  # Added dropout for regularization
+        )(x, x)  # Self-attention
+        x = tf.keras.layers.Add()([hist_input_layer, attn_output]) # Residual connection (note: using hist_input_layer here is intentional after positional embedding)
+
+        # Feed Forward Network
+        x = tf.keras.layers.LayerNormalization(epsilon=1e-6)(x)
+        ffn_output = tf.keras.layers.Dense(ff_dim, activation="relu")(x)
+        ffn_output = tf.keras.layers.Dense(head_size)(ffn_output) # Project back to the input feature dimension
+        transformer_output = tf.keras.layers.Add()([x, ffn_output]) # Residual connection
+
+        # --- Flatten and Dense Layers for Value Output ---
+        flattened = tf.keras.layers.Flatten()(transformer_output) # Flatten the output of the transformer
+        concatenated = tf.keras.layers.Concatenate()([flattened, state_input_layer]) # Concatenate with current state
+        dense3 = tf.keras.layers.Dense(64, activation='relu')(concatenated)
+        dense4 = tf.keras.layers.Dense(64, activation='tanh')(dense3)
+
+        mean_output = tf.keras.layers.Dense(self.action_dim, activation='softmax', name="mean_output")(dense4)
+        stddev_output = tf.keras.layers.Dense(self.action_dim, activation=lambda x: tf.nn.softplus(x) + 1e-8, name="stddev_output")(dense4)
+
         return tf.keras.Model(inputs=[state_input_layer, hist_input_layer], outputs=[mean_output, stddev_output])
 
     def _build_critic_model(self):
         """
-        Builds the critic neural network (value network).
-        Include attention layers, recurrent layers if desired.
+        Builds the critic neural network with a Transformer Encoder layer and Positional Embeddings.
         """
-        state_input_layer = tf.keras.layers.Input(shape=self.state_dim)
         hist_input_layer = tf.keras.layers.Input(shape=self.hist_dim)
-        flattened = tf.keras.layers.Flatten()(hist_input_layer)
-        # --- Implement critic network architecture with attention, recurrent layers ---
-        dense1 = tf.keras.layers.Dense(64, activation='relu')(state_input_layer)
-        dense2 = tf.keras.layers.Dense(64, activation='relu')(dense1)
-        dense3 = tf.keras.layers.Dense(64, activation='relu')(flattened)
-        concated = tf.keras.layers.concatenate([dense2, dense3], axis=1)
-        dense4 = tf.keras.layers.Dense(64, activation='tanh')(concated)
-        value_output = tf.keras.layers.Dense(1)(dense4) # Value function output
-        return tf.keras.Model(inputs=[state_input_layer, hist_input_layer], outputs=value_output)
+        state_input_layer = tf.keras.layers.Input(shape=self.state_dim)
+        time_steps = self.hist_dim[0]
+        num_features = self.hist_dim[1]
+
+        # --- Positional Embedding Layer ---
+        positional_embedding_layer = PositionalEmbedding(
+            sequence_length=time_steps, embedding_dim=num_features # Embedding dim matches feature dimension
+        )
+        x = positional_embedding_layer(hist_input_layer) # Apply positional embeddings
+
+        # --- Transformer Encoder Block ---
+        # Parameters for the Transformer Encoder
+        head_size = num_features  # Number of features, can be adjusted
+        num_heads = 2   # Number of attention heads
+        ff_dim = 64     # Hidden layer size in feed forward network
+
+        # Layer Normalization and Multi-Head Attention
+        x = tf.keras.layers.LayerNormalization(epsilon=1e-6)(x)
+        attn_output = tf.keras.layers.MultiHeadAttention(
+            key_dim=head_size, num_heads=num_heads, dropout=0.1  # Added dropout for regularization
+        )(x, x)  # Self-attention
+        x = tf.keras.layers.Add()([hist_input_layer, attn_output]) # Residual connection (note: using hist_input_layer here is intentional after positional embedding)
+
+        # Feed Forward Network
+        x = tf.keras.layers.LayerNormalization(epsilon=1e-6)(x)
+        ffn_output = tf.keras.layers.Dense(ff_dim, activation="relu")(x)
+        ffn_output = tf.keras.layers.Dense(head_size)(ffn_output) # Project back to the input feature dimension
+        transformer_output = tf.keras.layers.Add()([x, ffn_output]) # Residual connection
+
+        # --- Flatten and Dense Layers for Value Output ---
+        flattened = tf.keras.layers.Flatten()(transformer_output) # Flatten the output of the transformer
+        concatenated = tf.keras.layers.Concatenate()([flattened, state_input_layer]) # Concatenate with current state
+        dense3 = tf.keras.layers.Dense(64, activation='relu')(concatenated)
+        dense4 = tf.keras.layers.Dense(64, activation='tanh')(dense3)
+
+        value_layer = tf.keras.layers.Dense(1, activation='tanh')(dense4)
+
+        return tf.keras.Model(inputs=[state_input_layer, hist_input_layer], outputs=value_layer)
+
+    def _positional_encoding(self, seq_length, d_model):
+        """
+        Generates the positional encoding as described in "Attention is All You Need".
+
+        Args:
+            seq_length: The length of the sequence.
+            d_model: The dimensionality of the encoding (should match the embedding dimension).
+
+        Returns:
+            A tensor of shape (1, seq_length, d_model) containing the positional encoding.
+        """
+        position = tf.range(seq_length, dtype=tf.float32)[:, tf.newaxis]
+        div_term = tf.exp(tf.range(0, d_model, 2, dtype=tf.float32) * -(tf.math.log(10000.0) / d_model))
+        pe = tf.zeros((seq_length, d_model), dtype=tf.float32)
+
+        pe_sin = tf.sin(position * div_term)
+        pe_cos = tf.cos(position * div_term)
+
+        # Interleave sin and cos
+        pe_sin = tf.reshape(pe_sin, (seq_length, d_model // 2))
+        pe_cos = tf.reshape(pe_cos, (seq_length, d_model // 2))
+        pe = tf.concat([pe_sin, pe_cos], axis=-1)
+
+        return tf.expand_dims(pe, 0)  # Add a batch dimension
+
 
     def get_action(self, state):
         """
@@ -326,9 +426,9 @@ if __name__ == '__main__':
     test_data = val_data
 
     # --- Environment and Agent Setup ---
-    env = CryptoTradingEnvironment(train_data) # Use training data for environment
+    env = CryptoTradingEnvironment(train_data, n_days=14) # Use training data for environment
     current_state_dim = (3,)
-    hist_state_dim = (5, 17,)
+    hist_state_dim = (14, 17,)
     action_dim = len(env.coins) + 1
     agent = PPOAgent(current_state_dim, hist_state_dim, action_dim)
 
