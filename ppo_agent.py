@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import random
 import tensorflow as tf
 import tensorflow_probability as tfp
 
@@ -10,11 +11,16 @@ def get_crypto_data():
     Returns a dictionary or Pandas DataFrame with OHLCV data for each coin.
     """
     data = {}
-    coins = ['btc']
+    coins = ['btc', 'eth']
     for coin in coins:
         coin_data = pd.read_csv(f"normalized_data/{coin}.csv")
         coin_data.fillna(0, inplace=True)
         data[coin] = coin_data
+
+    common_timestamps = data['btc']['timestamp'].isin(data['eth']['timestamp']) & data['eth']['timestamp'].isin(data['btc']['timestamp'])
+    for coin in coins:
+        data[coin] = data[coin][common_timestamps]
+
     return data
 
 
@@ -79,7 +85,7 @@ class CryptoTradingEnvironment:
         self.n_days = n_days
 
     def reset(self):
-        self.current_step = 0
+        self.current_step = random.randint(0, 30000)
         self.capital = self.initial_capital
         self.holdings = {coin: 0 for coin in self.coins} # Units held for each coin
         self.portfolio_value_history = [self.capital]
@@ -90,18 +96,22 @@ class CryptoTradingEnvironment:
         Returns the current state representation (features) as a TensorFlow tensor.
         Extract features for the current timestep from self.data and portfolio state.
         """
-        current_state = [self.capital]
+        current_state = []
         historical_data = []
+        holdings_in_usd = [self.capital]
         for coin, df in self.data.items():
             price, coin_state = self._get_coin_state(df, self.current_step, self.n_days)
             current_state.append(price.numpy().item())
+            holdings_in_usd.append(self.holdings[coin] * df.iloc[self.current_step]['close'])
             historical_data.append(coin_state)
         
+        holdings_pct = holdings_in_usd / np.sum(holdings_in_usd)
+        current_state.extend(holdings_pct)
+
         # Concatenate states into a single tensor
-        historical_data = tf.concat(historical_data, axis=1)
+        historical_data = tf.concat(historical_data, axis=0)
 
         current_state = tf.constant(current_state, dtype=tf.float32)
-        current_state = tf.concat([list(self.holdings.values()), current_state], axis=0)
 
         return current_state, tf.transpose(historical_data, [1, 0])
     
@@ -182,6 +192,7 @@ class CryptoTradingEnvironment:
         else:
              normalized_actions = action_values
 
+        print(action_values)
 
         # 1. Calculate current portfolio value (before rebalancing)
         current_portfolio_value = self.capital
@@ -191,8 +202,7 @@ class CryptoTradingEnvironment:
             coin_prices.append(price)
             current_portfolio_value += self.holdings[coin] * price
 
-
-        # 2. Rebalance portfolio (CRITICAL CHANGES)
+        # 2. Rebalance portfolio
         self.capital = actions['cash'] * current_portfolio_value  # Update cash
 
         for i, coin in enumerate(self.coins):
@@ -202,11 +212,9 @@ class CryptoTradingEnvironment:
         # Update portfolio weights *after* rebalancing
         self.portfolio_weights = np.array(normalized_actions)
 
-
         # 3. Advance to the next time step
         self.current_step += 1
         next_state = self._get_state()
-
 
         # 4. Calculate the *new* portfolio value (after price changes)
         next_portfolio_value = self.capital
@@ -216,7 +224,7 @@ class CryptoTradingEnvironment:
 
         # 5. Calculate reward (log return)
         reward = 0.0
-        if next_portfolio_value > 0:
+        if next_portfolio_value > 0 and current_portfolio_value > 0:
             reward = np.log(current_portfolio_value / next_portfolio_value)
         # reward = np.maximum(0, next_portfolio_value - current_portfolio_value)
         # reward = (current_portfolio_value - next_portfolio_value) / current_portfolio_value
@@ -235,6 +243,14 @@ class CryptoTradingEnvironment:
         """
         # --- Implement visualization if desired ---
         pass
+
+    def get_current_portfolio_value(self):
+        current_portfolio_value = self.capital
+        for coin, df in self.data.items():
+            price = df.iloc[self.current_step]['close']
+            current_portfolio_value += self.holdings[coin] * price
+        
+        return current_portfolio_value
 
 
 # --- 3. PPO Agent (TensorFlow/Keras Example - Adapt for PyTorch if preferred) ---
@@ -267,7 +283,7 @@ class PPOAgent:
         # --- Transformer Encoder Block ---
         # Parameters for the Transformer Encoder
         head_size = num_features  # Number of features, can be adjusted
-        num_heads = 2   # Number of attention heads
+        num_heads = 8   # Number of attention heads
         ff_dim = 64     # Hidden layer size in feed forward network
 
         # Layer Normalization and Multi-Head Attention
@@ -427,8 +443,8 @@ if __name__ == '__main__':
 
     # --- Environment and Agent Setup ---
     env = CryptoTradingEnvironment(train_data, n_days=14) # Use training data for environment
-    current_state_dim = (3,)
-    hist_state_dim = (14, 17,)
+    current_state_dim = (5,)
+    hist_state_dim = (14, 17*2,)
     action_dim = len(env.coins) + 1
     agent = PPOAgent(current_state_dim, hist_state_dim, action_dim)
 
@@ -444,6 +460,7 @@ if __name__ == '__main__':
             action_set = {}
             action_set['cash'] = action[0]
             action_set['btc'] = action[1]
+            action_set['eth'] = action[2]
 
             next_state, reward, done, _ = env.step(action_set)
 
@@ -463,6 +480,8 @@ if __name__ == '__main__':
             state = next_state
             if done:
                 break
+
+        print(env.get_current_portfolio_value())
 
         # --- Calculate GAE (Generalized Advantage Estimation) ---
         current_state, hist_state = next_state

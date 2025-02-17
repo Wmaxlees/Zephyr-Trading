@@ -185,6 +185,6 @@ def process_csv(input_csv_path, output_csv_path):
             print(f"Error writing to output CSV: {e}")
 
 # Example usage (assuming you have 'input.csv' in the same directory):
-input_file = 'btc_usd_historical_data_coinbase.csv'
-output_file = 'augmented_data/btc.csv'
+input_file = 'raw_data/eth.csv'
+output_file = 'augmented_data/eth.csv'
 process_csv(input_file, output_file)

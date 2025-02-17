@@ -83,21 +83,11 @@ def get_coinbase_historical(symbol, start_date, end_date):
 
 
 # --- Example Usage ---
-start_date = '2023-01-01'
+start_date = '2020-01-01'
 end_date = '2024-12-31'
 
-# Valid symbol
-btc_data = get_coinbase_historical('BTC/USD', start_date, end_date)
-if btc_data is not None and not btc_data.empty:
-    print(f"\nBTC/USD Data:\n{btc_data.head()}")
-    btc_data.to_csv("btc_usd_historical_data_coinbase.csv")
+data = get_coinbase_historical('BTC/USD', start_date, end_date)
+if data is not None and not data.empty:
+    print(f"\nData:\n{data.head()}")
+    data.to_csv("raw_data/btc.csv")
 
-# Invalid symbol
-invalid_data = get_coinbase_historical('INVALID/SYMBOL', start_date, end_date)
-if invalid_data is None:
-    print("\nInvalid symbol test: Passed (returned None as expected)")
-
-# Valid symbol, but no data
-empty_data = get_coinbase_historical('BTC/USD', '2010-01-01', '2010-01-05') #before BTC was on coinbase
-if empty_data is not None and empty_data.empty:
-        print(f"\nBTC/USD Data (should be empty):\n{empty_data}")
