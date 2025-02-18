@@ -41,8 +41,8 @@ def split_data(data_dict, train_ratio=0.8):
 
     Returns:
         tuple: A tuple containing two dictionaries: (train_data_dict, val_data_dict).
-                 Each dictionary has the same keys as the input, but the values are
-                 the split DataFrames for training and validation, respectively.
+                     Each dictionary has the same keys as the input, but the values are
+                     the split DataFrames for training and validation, respectively.
     """
     train_data_dict = {}
     val_data_dict = {}
@@ -83,7 +83,7 @@ class PositionalEmbedding(tf.keras.layers.Layer):
 
 
 class CryptoTradingEnvironment:
-    def __init__(self, data, initial_capital=1000, n_days=5, sharpe_window=30): # Added sharpe_window
+    def __init__(self, data, initial_capital=1000, n_days=5, sharpe_window=30, slippage_factor=0.005): # Added sharpe_window and slippage_factor
         self.data = data # Preprocessed data
         self.coins = list(data.keys())
         self.initial_capital = initial_capital
@@ -92,6 +92,7 @@ class CryptoTradingEnvironment:
         self.n_days = n_days
         self.sharpe_window = sharpe_window # Window for Sharpe Ratio calculation
         self.portfolio_returns = [] # Store portfolio returns for Sharpe Ratio calculation
+        self.slippage_factor = slippage_factor # Slippage factor for transaction cost simulation
 
     def reset(self):
         self.current_step = random.randint(0, 10000)
@@ -216,7 +217,11 @@ class CryptoTradingEnvironment:
 
         for i, coin in enumerate(self.coins):
             target_value_in_coin = actions[coin] * current_portfolio_value
-            self.holdings[coin] = target_value_in_coin / coin_prices[i]  # Buy/sell to target *shares*
+            current_price = coin_prices[i]
+            # Simulate slippage - Randomly adjust the execution price
+            slippage = random.uniform(-self.slippage_factor, self.slippage_factor)
+            execution_price = current_price * (1 + slippage)
+            self.holdings[coin] = target_value_in_coin / execution_price  # Buy/sell to target *shares*
 
         # Update portfolio weights *after* rebalancing
         self.portfolio_weights = np.array(normalized_actions)
@@ -522,7 +527,7 @@ if __name__ == '__main__':
     buffer_capacity = 100000
     train_actor_every_step = 2 # Delayed actor updates
     sharpe_window = 30 # Window size for Sharpe Ratio calculation
-
+    slippage_factor = 0.01 # Slippage factor (e.g., 0.01 for 1% slippage) # New hyperparameter
 
     # --- Get Data ---
     crypto_data = get_crypto_data()
@@ -530,7 +535,7 @@ if __name__ == '__main__':
     test_data = val_data
 
     # --- Environment and Agent Setup ---
-    env = CryptoTradingEnvironment(train_data, n_days=14, sharpe_window=sharpe_window)  # Use training data for environment, pass sharpe_window
+    env = CryptoTradingEnvironment(train_data, n_days=14, sharpe_window=sharpe_window, slippage_factor=slippage_factor)  # Use training data for environment, pass sharpe_window and slippage_factor
     current_state_dim = (9,)
     hist_state_dim = (14, 17*len(env.coins),)
     action_dim = len(env.coins) + 1
