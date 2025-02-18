@@ -110,8 +110,8 @@ def process_csv(input_csv_path, output_csv_path):
 
 # --- Example Usage (with provided data) ---
 if __name__ == '__main__':
-    input_file = 'augmented_data/eth.csv'
-    output_file = 'normalized_data/eth.csv'
+    input_file = 'augmented_data/sol.csv'
+    output_file = 'normalized_data/sol.csv'
 
     process_csv(input_file, output_file)
 

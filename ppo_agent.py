@@ -11,15 +11,22 @@ def get_crypto_data():
     Returns a dictionary or Pandas DataFrame with OHLCV data for each coin.
     """
     data = {}
-    coins = ['btc', 'eth']
+    coins = ['btc', 'eth', 'xrp', 'sol']
     for coin in coins:
         coin_data = pd.read_csv(f"normalized_data/{coin}.csv")
         coin_data.fillna(0, inplace=True)
+        coin_data.drop_duplicates(subset='timestamp', inplace=True)
         data[coin] = coin_data
 
-    common_timestamps = data['btc']['timestamp'].isin(data['eth']['timestamp']) & data['eth']['timestamp'].isin(data['btc']['timestamp'])
+    common_timestamps = data[coins[0]]['timestamp']
+
+    # Iterate through the rest of the coins
+    for coin in coins[1:]:
+        common_timestamps = common_timestamps[common_timestamps.isin(data[coin]['timestamp'])]
+
+    # Filter each DataFrame
     for coin in coins:
-        data[coin] = data[coin][common_timestamps]
+        data[coin] = data[coin][data[coin]['timestamp'].isin(common_timestamps)]
 
     return data
 
@@ -34,8 +41,8 @@ def split_data(data_dict, train_ratio=0.8):
 
     Returns:
         tuple: A tuple containing two dictionaries: (train_data_dict, val_data_dict).
-               Each dictionary has the same keys as the input, but the values are
-               the split DataFrames for training and validation, respectively.
+                Each dictionary has the same keys as the input, but the values are
+                the split DataFrames for training and validation, respectively.
     """
     train_data_dict = {}
     val_data_dict = {}
@@ -45,7 +52,7 @@ def split_data(data_dict, train_ratio=0.8):
     for df in list(data_dict.values()):
         if len(df) != first_df_len:
             raise ValueError("All DataFrames in the dictionary must have the same length.")
-        
+
 
     num_samples = first_df_len
     train_size = int(num_samples * train_ratio)
@@ -104,7 +111,7 @@ class CryptoTradingEnvironment:
             current_state.append(price.numpy().item())
             holdings_in_usd.append(self.holdings[coin] * df.iloc[self.current_step]['close'])
             historical_data.append(coin_state)
-        
+
         holdings_pct = holdings_in_usd / np.sum(holdings_in_usd)
         current_state.extend(holdings_pct)
 
@@ -114,7 +121,7 @@ class CryptoTradingEnvironment:
         current_state = tf.constant(current_state, dtype=tf.float32)
 
         return current_state, tf.transpose(historical_data, [1, 0])
-    
+
     def _get_coin_state(self, data, t, n_days):
         """
         Gets the state representation from the BTC data.
@@ -165,13 +172,7 @@ class CryptoTradingEnvironment:
     def step(self, actions):
         """
         Executes a step using a *dictionary* of actions.
-
-        Args:
-            actions (dict):  A dictionary where keys are 'cash' and coin names,
-                             and values are the desired portfolio weights (0.0 to 1.0).
-
-        Returns:
-             tuple: (next_state, reward, done, info)
+        ... (rest of docstring) ...
         """
 
         # 0. Input Validation and Action Normalization (CRITICAL)
@@ -183,16 +184,21 @@ class CryptoTradingEnvironment:
 
         action_values = [actions['cash']] + [actions[coin] for coin in self.coins]
         total_action_value = sum(action_values)
-        if not np.isclose(total_action_value, 1.0):
+
+        if np.isclose(total_action_value, 0.0):  # Check if total_action_value is close to zero
+            print("Warning: Total action value is close to zero. Setting normalized actions to zero.")
+            normalized_actions = [0.0] * len(action_values) # Set all weights to zero if sum is zero
+            actions['cash'] = 0.0
+            for i, coin in enumerate(self.coins):
+                actions[coin] = 0.0
+        elif not np.isclose(total_action_value, 1.0):
             # Normalize actions to ensure they sum to 1.0
             normalized_actions = [val / total_action_value for val in action_values]
             actions['cash'] = normalized_actions[0]
             for i, coin in enumerate(self.coins):
                 actions[coin] = normalized_actions[i + 1]
         else:
-             normalized_actions = action_values
-
-        print(action_values)
+            normalized_actions = action_values
 
         # 1. Calculate current portfolio value (before rebalancing)
         current_portfolio_value = self.capital
@@ -225,9 +231,7 @@ class CryptoTradingEnvironment:
         # 5. Calculate reward (log return)
         reward = 0.0
         if next_portfolio_value > 0 and current_portfolio_value > 0:
-            reward = np.log(current_portfolio_value / next_portfolio_value)
-        # reward = np.maximum(0, next_portfolio_value - current_portfolio_value)
-        # reward = (current_portfolio_value - next_portfolio_value) / current_portfolio_value
+            reward = np.log(next_portfolio_value / current_portfolio_value)
 
         # 6. Check if episode is done
         done = self.current_step >= len(list(self.data.values())[0]) - 1 or next_portfolio_value == 0
@@ -249,192 +253,263 @@ class CryptoTradingEnvironment:
         for coin, df in self.data.items():
             price = df.iloc[self.current_step]['close']
             current_portfolio_value += self.holdings[coin] * price
-        
+
         return current_portfolio_value
 
 
-# --- 3. PPO Agent (TensorFlow/Keras Example - Adapt for PyTorch if preferred) ---
-class PPOAgent:
+# --- 3. TD3 Agent ---
+class TD3Agent:
     def __init__(self, state_dim, hist_dim, action_dim):
         self.state_dim = state_dim
         self.hist_dim = hist_dim
         self.action_dim = action_dim
+
+        # Actor Network
         self.actor_model = self._build_actor_model()
-        self.critic_model = self._build_critic_model()
-        self.optimizer_actor = tf.keras.optimizers.Adam(learning_rate=1e-3) # Tune LR
-        self.optimizer_critic = tf.keras.optimizers.Adam(learning_rate=1e-3) # Tune LR
-        self.clip_param = 0.2 # PPO clip parameter - Tune
+        self.target_actor_model = self._build_actor_model()
+        self.target_actor_model.set_weights(self.actor_model.get_weights())
+        self.optimizer_actor = tf.keras.optimizers.Adam(learning_rate=1e-4)
+
+        # Critic Networks (Two critics for TD3)
+        self.critic_model_1 = self._build_critic_model()
+        self.critic_model_2 = self._build_critic_model()
+        self.target_critic_model_1 = self._build_critic_model()
+        self.target_critic_model_2 = self._build_critic_model()
+        self.target_critic_model_1.set_weights(self.critic_model_1.get_weights())
+        self.target_critic_model_2.set_weights(self.critic_model_2.get_weights())
+        self.optimizer_critic_1 = tf.keras.optimizers.Adam(learning_rate=1e-3)
+        self.optimizer_critic_2 = tf.keras.optimizers.Adam(learning_rate=1e-3)
+
+        # Hyperparameters for TD3
+        self.gamma = 0.99
+        self.tau = 0.005  # Soft update parameter
+        self.policy_noise_std = 0.2
+        self.policy_noise_clip = 0.5
+        self.policy_freq = 2 # Delayed policy updates, update actor every policy_freq critic updates
+        self.total_steps = 0
+
 
     def _build_actor_model(self):
-        """
-        Builds the actor neural network with a Transformer Encoder layer and Positional Embeddings.
-        """
+        """Builds the actor model."""
         hist_input_layer = tf.keras.layers.Input(shape=self.hist_dim)
         state_input_layer = tf.keras.layers.Input(shape=self.state_dim)
         time_steps = self.hist_dim[0]
         num_features = self.hist_dim[1]
 
-        # --- Positional Embedding Layer ---
+        # Positional Embedding Layer
         positional_embedding_layer = PositionalEmbedding(
-            sequence_length=time_steps, embedding_dim=num_features # Embedding dim matches feature dimension
+            sequence_length=time_steps, embedding_dim=num_features
         )
-        x = positional_embedding_layer(hist_input_layer) # Apply positional embeddings
+        x = positional_embedding_layer(hist_input_layer)
 
-        # --- Transformer Encoder Block ---
-        # Parameters for the Transformer Encoder
-        head_size = num_features  # Number of features, can be adjusted
-        num_heads = 8   # Number of attention heads
-        ff_dim = 64     # Hidden layer size in feed forward network
+        # Transformer Encoder Block
+        head_size = num_features
+        num_heads = 8
+        ff_dim = 64
 
-        # Layer Normalization and Multi-Head Attention
         x = tf.keras.layers.LayerNormalization(epsilon=1e-6)(x)
         attn_output = tf.keras.layers.MultiHeadAttention(
-            key_dim=head_size, num_heads=num_heads, dropout=0.1  # Added dropout for regularization
-        )(x, x)  # Self-attention
-        x = tf.keras.layers.Add()([hist_input_layer, attn_output]) # Residual connection (note: using hist_input_layer here is intentional after positional embedding)
+            key_dim=head_size, num_heads=num_heads, dropout=0.1
+        )(x, x)
+        x = tf.keras.layers.Add()([hist_input_layer, attn_output])
 
-        # Feed Forward Network
         x = tf.keras.layers.LayerNormalization(epsilon=1e-6)(x)
         ffn_output = tf.keras.layers.Dense(ff_dim, activation="relu")(x)
-        ffn_output = tf.keras.layers.Dense(head_size)(ffn_output) # Project back to the input feature dimension
-        transformer_output = tf.keras.layers.Add()([x, ffn_output]) # Residual connection
+        ffn_output = tf.keras.layers.Dense(head_size)(ffn_output)
+        transformer_output = tf.keras.layers.Add()([x, ffn_output])
 
-        # --- Flatten and Dense Layers for Value Output ---
-        flattened = tf.keras.layers.Flatten()(transformer_output) # Flatten the output of the transformer
-        concatenated = tf.keras.layers.Concatenate()([flattened, state_input_layer]) # Concatenate with current state
-        dense3 = tf.keras.layers.Dense(64, activation='relu')(concatenated)
-        dense4 = tf.keras.layers.Dense(64, activation='tanh')(dense3)
+        # Flatten and Dense Layers
+        flattened = tf.keras.layers.Flatten()(transformer_output)
+        concatenated = tf.keras.layers.Concatenate()([flattened, state_input_layer])
+        dense1 = tf.keras.layers.Dense(128, activation='relu')(concatenated)
+        dense2 = tf.keras.layers.Dense(64, activation='relu')(dense1)
+        output = tf.keras.layers.Dense(self.action_dim, activation='sigmoid')(dense2)
 
-        mean_output = tf.keras.layers.Dense(self.action_dim, activation='softmax', name="mean_output")(dense4)
-        stddev_output = tf.keras.layers.Dense(self.action_dim, activation=lambda x: tf.nn.softplus(x) + 1e-8, name="stddev_output")(dense4)
+        return tf.keras.Model(inputs=[state_input_layer, hist_input_layer], outputs=output)
 
-        return tf.keras.Model(inputs=[state_input_layer, hist_input_layer], outputs=[mean_output, stddev_output])
 
     def _build_critic_model(self):
-        """
-        Builds the critic neural network with a Transformer Encoder layer and Positional Embeddings.
-        """
+        """Builds the critic model."""
         hist_input_layer = tf.keras.layers.Input(shape=self.hist_dim)
         state_input_layer = tf.keras.layers.Input(shape=self.state_dim)
+        action_input_layer = tf.keras.layers.Input(shape=(self.action_dim,)) # Action input for critic
         time_steps = self.hist_dim[0]
         num_features = self.hist_dim[1]
 
-        # --- Positional Embedding Layer ---
+        # Positional Embedding Layer
         positional_embedding_layer = PositionalEmbedding(
-            sequence_length=time_steps, embedding_dim=num_features # Embedding dim matches feature dimension
+            sequence_length=time_steps, embedding_dim=num_features
         )
-        x = positional_embedding_layer(hist_input_layer) # Apply positional embeddings
+        x = positional_embedding_layer(hist_input_layer)
 
-        # --- Transformer Encoder Block ---
-        # Parameters for the Transformer Encoder
-        head_size = num_features  # Number of features, can be adjusted
-        num_heads = 2   # Number of attention heads
-        ff_dim = 64     # Hidden layer size in feed forward network
+        # Transformer Encoder Block (smaller for critic)
+        head_size = num_features
+        num_heads = 2
+        ff_dim = 64
 
-        # Layer Normalization and Multi-Head Attention
         x = tf.keras.layers.LayerNormalization(epsilon=1e-6)(x)
         attn_output = tf.keras.layers.MultiHeadAttention(
-            key_dim=head_size, num_heads=num_heads, dropout=0.1  # Added dropout for regularization
-        )(x, x)  # Self-attention
-        x = tf.keras.layers.Add()([hist_input_layer, attn_output]) # Residual connection (note: using hist_input_layer here is intentional after positional embedding)
+            key_dim=head_size, num_heads=num_heads, dropout=0.1
+        )(x, x)
+        x = tf.keras.layers.Add()([hist_input_layer, attn_output])
 
-        # Feed Forward Network
         x = tf.keras.layers.LayerNormalization(epsilon=1e-6)(x)
         ffn_output = tf.keras.layers.Dense(ff_dim, activation="relu")(x)
-        ffn_output = tf.keras.layers.Dense(head_size)(ffn_output) # Project back to the input feature dimension
-        transformer_output = tf.keras.layers.Add()([x, ffn_output]) # Residual connection
+        ffn_output = tf.keras.layers.Dense(head_size)(ffn_output)
+        transformer_output = tf.keras.layers.Add()([x, ffn_output])
 
-        # --- Flatten and Dense Layers for Value Output ---
-        flattened = tf.keras.layers.Flatten()(transformer_output) # Flatten the output of the transformer
-        concatenated = tf.keras.layers.Concatenate()([flattened, state_input_layer]) # Concatenate with current state
-        dense3 = tf.keras.layers.Dense(64, activation='relu')(concatenated)
-        dense4 = tf.keras.layers.Dense(64, activation='tanh')(dense3)
+        # Flatten and Concatenate with Action Input
+        flattened = tf.keras.layers.Flatten()(transformer_output)
+        concatenated = tf.keras.layers.Concatenate()([flattened, state_input_layer, action_input_layer]) # Critic takes state and action
+        dense1 = tf.keras.layers.Dense(128, activation='relu')(concatenated)
+        dense2 = tf.keras.layers.Dense(64, activation='relu')(dense1)
+        value_output = tf.keras.layers.Dense(1, activation='linear')(dense2) # Q-value output
 
-        value_layer = tf.keras.layers.Dense(1, activation='tanh')(dense4)
-
-        return tf.keras.Model(inputs=[state_input_layer, hist_input_layer], outputs=value_layer)
-
-    def _positional_encoding(self, seq_length, d_model):
-        """
-        Generates the positional encoding as described in "Attention is All You Need".
-
-        Args:
-            seq_length: The length of the sequence.
-            d_model: The dimensionality of the encoding (should match the embedding dimension).
-
-        Returns:
-            A tensor of shape (1, seq_length, d_model) containing the positional encoding.
-        """
-        position = tf.range(seq_length, dtype=tf.float32)[:, tf.newaxis]
-        div_term = tf.exp(tf.range(0, d_model, 2, dtype=tf.float32) * -(tf.math.log(10000.0) / d_model))
-        pe = tf.zeros((seq_length, d_model), dtype=tf.float32)
-
-        pe_sin = tf.sin(position * div_term)
-        pe_cos = tf.cos(position * div_term)
-
-        # Interleave sin and cos
-        pe_sin = tf.reshape(pe_sin, (seq_length, d_model // 2))
-        pe_cos = tf.reshape(pe_cos, (seq_length, d_model // 2))
-        pe = tf.concat([pe_sin, pe_cos], axis=-1)
-
-        return tf.expand_dims(pe, 0)  # Add a batch dimension
+        return tf.keras.Model(inputs=[state_input_layer, hist_input_layer, action_input_layer], outputs=value_output)
 
 
-    def get_action(self, state):
-        """
-        Samples action from the actor network based on the current state.
-        Returns action, log probability of the action.
-        """
+    def get_action(self, state, noise=True):
+        """Samples action from actor network, adds exploration noise."""
         current_state = tf.expand_dims(state[0], axis=0)
         hist_state = tf.expand_dims(state[1], axis=0)
-        mean, stddev = self.actor_model((current_state, hist_state,))
-        # Sample action from normal distribution parameterized by mean and stddev
-        normal_dist = tfp.distributions.Normal(mean, stddev) # Requires TensorFlow Probability
-        action = normal_dist.sample()
-        log_prob = normal_dist.log_prob(action)
-        return action.numpy()[0], log_prob.numpy()[0]
+        action = self.actor_model((current_state, hist_state))
 
-    def train_step(self, states, actions, advantages, log_probs_old, returns):
-        """
-        Performs one training step of PPO algorithm: updates actor and critic networks.
-        """
-        advantages_tensor = tf.convert_to_tensor(advantages, dtype=tf.float32)
-        advantages_tensor_expanded = tf.expand_dims(advantages_tensor, axis=1) # Expand to (64, 1)
-        advantages_tensor_expanded = tf.tile(advantages_tensor_expanded, [1, self.action_dim]) # Tile to (64, 2) - assuming action_dim=2
-        log_probs_old_tensor = tf.convert_to_tensor(log_probs_old, dtype=tf.float32)
-        returns_tensor = tf.convert_to_tensor(returns, dtype=tf.float32)
+        if noise:
+            # Add exploration noise
+            noise_val = np.random.normal(0, self.policy_noise_std, size=self.action_dim).clip(-self.policy_noise_clip, self.policy_noise_clip)
+            action = action.numpy() + noise_val
+            action = np.clip(action, 0.0, 1.0) # Clip action to [0, 1]
+            action = tf.convert_to_tensor(action, dtype=tf.float32)
 
-        # --- Critic Training ---
-        with tf.GradientTape() as tape_critic:
-            values_predicted = self.critic_model(states)
-            critic_loss = tf.keras.losses.MeanSquaredError()(returns_tensor, values_predicted) # MSE loss
-        grads_critic = tape_critic.gradient(critic_loss, self.critic_model.trainable_variables)
-        self.optimizer_critic.apply_gradients(zip(grads_critic, self.critic_model.trainable_variables))
 
-        # --- Actor Training ---
-        with tf.GradientTape() as tape_actor:
-            mean, stddev = self.actor_model(states)
-            normal_dist = tfp.distributions.Normal(mean, stddev)
-            log_probs_new = normal_dist.log_prob(actions)
-            # print(log_probs_new)
-            ratio = tf.exp(log_probs_new - log_probs_old_tensor)
-            policy_loss_unclipped = -ratio * advantages_tensor_expanded # Use expanded advantages
-            policy_loss_clipped = -tf.clip_by_value(ratio, 1-self.clip_param, 1+self.clip_param) * advantages_tensor_expanded # Use expanded advantages
-            actor_loss = tf.reduce_mean(tf.maximum(policy_loss_unclipped, policy_loss_clipped)) # PPO Clipped loss
-        grads_actor = tape_actor.gradient(actor_loss, self.actor_model.trainable_variables)
-        self.optimizer_actor.apply_gradients(zip(grads_actor, self.actor_model.trainable_variables))
+        return action.numpy()[0]
 
-        return actor_loss, critic_loss
 
+    def train_step(self, replay_buffer, batch_size):
+        """Performs one training step for actor and critics using replay buffer data."""
+        self.total_steps += 1
+
+        # Sample a batch from replay buffer
+        state_batch, hist_state_batch, action_batch, reward_batch, next_state_batch, next_hist_state_batch, done_batch = replay_buffer.sample(batch_size)
+
+        # ---------------- Train Critics ----------------
+        with tf.GradientTape() as tape_critic_1, tf.GradientTape() as tape_critic_2:
+            # Target actions with target policy smoothing noise
+            target_actions = self.target_actor_model((next_state_batch, next_hist_state_batch))
+            clipped_noise = np.clip(np.random.normal(0, self.policy_noise_std, size=(batch_size, self.action_dim)), -self.policy_noise_clip, self.policy_noise_clip)
+            smoothed_target_actions = np.clip(target_actions + clipped_noise, 0.0, 1.0) # Clip smoothed action to [0, 1]
+            smoothed_target_actions = tf.convert_to_tensor(smoothed_target_actions, dtype=tf.float32)
+
+
+            # Target Q-values (clipped double Q-learning)
+            target_q_values_1 = self.target_critic_model_1((next_state_batch, next_hist_state_batch, smoothed_target_actions))
+            target_q_values_2 = self.target_critic_model_2((next_state_batch, next_hist_state_batch, smoothed_target_actions))
+            target_q_values = tf.minimum(target_q_values_1, target_q_values_2)
+
+            y_values = reward_batch + self.gamma * (1.0 - done_batch) * target_q_values # TD target
+
+            # Critic loss
+            critic_loss_1 = tf.keras.losses.MeanSquaredError()(self.critic_model_1((state_batch, hist_state_batch, action_batch)), y_values)
+            critic_loss_2 = tf.keras.losses.MeanSquaredError()(self.critic_model_2((state_batch, hist_state_batch, action_batch)), y_values)
+
+
+        critic_grads_1 = tape_critic_1.gradient(critic_loss_1, self.critic_model_1.trainable_variables)
+        critic_grads_2 = tape_critic_2.gradient(critic_loss_2, self.critic_model_2.trainable_variables)
+        self.optimizer_critic_1.apply_gradients(zip(critic_grads_1, self.critic_model_1.trainable_variables))
+        self.optimizer_critic_2.apply_gradients(zip(critic_grads_2, self.critic_model_2.trainable_variables))
+
+
+        # Delayed Policy Updates
+        actor_loss = 0 # Initialize actor_loss
+        if self.total_steps % self.policy_freq == 0:
+            # ---------------- Train Actor ----------------
+            with tf.GradientTape() as tape_actor:
+                actor_actions = self.actor_model((state_batch, hist_state_batch))
+                actor_loss = -tf.reduce_mean(self.critic_model_1((state_batch, hist_state_batch, actor_actions))) # Maximize Q-values from critic 1
+            actor_grads = tape_actor.gradient(actor_loss, self.actor_model.trainable_variables)
+            self.optimizer_actor.apply_gradients(zip(actor_grads, self.actor_model.trainable_variables))
+
+            # ---------------- Target Network Updates ----------------
+            self.soft_update_target_networks()
+
+        return actor_loss, critic_loss_1, critic_loss_2
+
+
+    def soft_update_target_networks(self):
+        """Soft updates the target networks."""
+        self.update_target_network(self.target_actor_model, self.actor_model)
+        self.update_target_network(self.target_critic_model_1, self.critic_model_1)
+        self.update_target_network(self.target_critic_model_2, self.critic_model_2)
+
+
+    def update_target_network(self, target_weights, current_weights):
+        """Updates target network weights using soft update (polyak averaging)."""
+        for target_variable, current_variable in zip(target_weights.variables, current_weights.variables):
+            target_variable.assign(self.tau * current_variable + (1 - self.tau) * target_variable)
+
+
+
+# --- Replay Buffer ---
+class ReplayBuffer:
+    def __init__(self, buffer_capacity=100000):
+        self.buffer_capacity = buffer_capacity
+        self.buffer_counter = 0
+        self.state_buffer = None
+        self.hist_state_buffer = None
+        self.action_buffer = None
+        self.reward_buffer = None
+        self.next_state_buffer = None
+        self.next_hist_state_buffer = None
+        self.done_buffer = None
+
+    def record(self, state, hist_state, action, reward, next_state, next_hist_state, done):
+        """Records experience to buffer, initializes buffer on first record."""
+        if self.buffer_counter == 0:
+            self.state_buffer = np.zeros((self.buffer_capacity, state[0].shape[0]), dtype=np.float32)
+            self.hist_state_buffer = np.zeros((self.buffer_capacity, hist_state[1].shape[0], hist_state[1].shape[1]), dtype=np.float32)
+            self.action_buffer = np.zeros((self.buffer_capacity, action.shape[0]), dtype=np.float32)
+            self.reward_buffer = np.zeros((self.buffer_capacity, 1), dtype=np.float32)
+            self.next_state_buffer = np.zeros((self.buffer_capacity, next_state[0].shape[0]), dtype=np.float32)
+            self.next_hist_state_buffer = np.zeros((self.buffer_capacity, next_hist_state[1].shape[0], next_hist_state[1].shape[1]), dtype=np.float32)
+            self.done_buffer = np.zeros((self.buffer_capacity, 1), dtype=np.float32)
+
+        index = self.buffer_counter % self.buffer_capacity
+
+        self.state_buffer[index] = state[0]
+        self.hist_state_buffer[index] = hist_state[1]
+        self.action_buffer[index] = action
+        self.reward_buffer[index] = np.array([reward])
+        self.next_state_buffer[index] = next_state[0]
+        self.next_hist_state_buffer[index] = next_state[1]
+        self.done_buffer[index] = np.array([float(done)])
+
+        self.buffer_counter += 1
+
+
+    def sample(self, batch_size):
+        """Samples a batch from the buffer."""
+        record_range = min(self.buffer_counter, self.buffer_capacity)
+        batch_indices = np.random.choice(record_range, batch_size)
+
+        state_batch = tf.convert_to_tensor(self.state_buffer[batch_indices], dtype=tf.float32)
+        hist_state_batch = tf.convert_to_tensor(self.hist_state_buffer[batch_indices], dtype=tf.float32)
+        action_batch = tf.convert_to_tensor(self.action_buffer[batch_indices], dtype=tf.float32)
+        reward_batch = tf.convert_to_tensor(self.reward_buffer[batch_indices], dtype=tf.float32)
+        next_state_batch = tf.convert_to_tensor(self.next_state_buffer[batch_indices], dtype=tf.float32)
+        next_hist_state_batch = tf.convert_to_tensor(self.next_hist_state_buffer[batch_indices], dtype=tf.float32)
+        done_batch = tf.convert_to_tensor(self.done_buffer[batch_indices], dtype=tf.float32)
+
+        return state_batch, hist_state_batch, action_batch, reward_batch, next_state_batch, next_hist_state_batch, done_batch
 
 # --- 4. Training Loop ---
 if __name__ == '__main__':
     # --- Hyperparameters (Tune these!) ---
-    episodes = 1000 # Number of training episodes
-    timesteps_per_episode = 200 # Length of each episode
-    batch_size = 64 # Batch size for training updates
-    gamma = 0.99 # Discount factor
-    gae_lambda = 0.95 # GAE lambda parameter
+    episodes = 1000  # Number of training episodes
+    timesteps_per_episode = 200  # Length of each episode
+    batch_size = 64  # Batch size for training updates
+    buffer_capacity = 100000
+    train_actor_every_step = 2 # Delayed actor updates
+
 
     # --- Get Data ---
     crypto_data = get_crypto_data()
@@ -442,86 +517,47 @@ if __name__ == '__main__':
     test_data = val_data
 
     # --- Environment and Agent Setup ---
-    env = CryptoTradingEnvironment(train_data, n_days=14) # Use training data for environment
-    current_state_dim = (5,)
-    hist_state_dim = (14, 17*2,)
+    env = CryptoTradingEnvironment(train_data, n_days=14)  # Use training data for environment
+    current_state_dim = (9,)
+    hist_state_dim = (14, 17*len(env.coins),)
     action_dim = len(env.coins) + 1
-    agent = PPOAgent(current_state_dim, hist_state_dim, action_dim)
+    agent = TD3Agent(current_state_dim, hist_state_dim, action_dim)
+    replay_buffer = ReplayBuffer(buffer_capacity)
+
 
     # --- Training ---
     for episode in range(episodes):
         state = env.reset()
         episode_rewards = []
-        episode_current_states, episode_hist_states, episode_actions, episode_log_probs, episode_rewards_gae, episode_values = [], [], [], [], [], []
 
         for timestep in range(timesteps_per_episode):
-            action, log_prob = agent.get_action(state)
+            action = agent.get_action(state)
 
             action_set = {}
             action_set['cash'] = action[0]
             action_set['btc'] = action[1]
             action_set['eth'] = action[2]
+            action_set['xrp'] = action[3]
+            action_set['sol'] = action[4]
 
             next_state, reward, done, _ = env.step(action_set)
 
-            episode_current_states.append(state[0])
-            episode_hist_states.append(state[1])
-            episode_actions.append(action)
-            episode_log_probs.append(log_prob)
             episode_rewards.append(reward)
+            replay_buffer.record(state, state, action, reward, next_state, next_state, done) # Record experience
 
-            current_state, hist_state = state  # Unpack the tuple
-            current_state = np.expand_dims(current_state.numpy(), axis=0)
-            hist_state = np.expand_dims(hist_state.numpy(), axis=0)
 
-            value_prediction = agent.critic_model([current_state, hist_state])
-            episode_values.append(value_prediction[0,0].numpy()) # Predict value for GAE
+            if replay_buffer.buffer_counter > batch_size: # Start training after buffer is filled a bit
+                actor_loss, critic_loss_1, critic_loss_2 = agent.train_step(replay_buffer, batch_size)
+                if agent.total_steps % 10 == 0: # Print loss less frequently
+                    print(f"Step {agent.total_steps}, Actor Loss: {actor_loss.numpy():.4f}, Critic Loss 1: {critic_loss_1.numpy():.4f}, Critic Loss 2: {critic_loss_2.numpy():.4f}")
+
 
             state = next_state
             if done:
                 break
 
-        print(env.get_current_portfolio_value())
-
-        # --- Calculate GAE (Generalized Advantage Estimation) ---
-        current_state, hist_state = next_state
-        current_state = np.expand_dims(current_state.numpy(), axis=0)
-        hist_state = np.expand_dims(hist_state.numpy(), axis=0)
-        values_next = agent.critic_model((current_state, hist_state))[0,0].numpy() if not done else 0
-        episode_values.append(values_next)
-        advantages = []
-        gae = 0.0
-        for t in reversed(range(len(episode_rewards))): # Reverse iterate for GAE calculation
-            delta = episode_rewards[t] + gamma * episode_values[t+1] - episode_values[t]
-            gae = delta + gamma * gae_lambda * gae
-            advantages.insert(0, gae) # Insert scalar gae directly (REVISED LINE - NO REPEAT)
-        episode_rewards_gae = np.array(advantages)
-
-        # --- Prepare batch data ---
-        current_states_batch = np.array(episode_current_states)
-        hist_states_batch = np.array(episode_hist_states)
-        actions_batch = np.array(episode_actions)
-        log_probs_batch = np.array(episode_log_probs)
-        returns_batch = episode_rewards_gae + np.array(episode_values[:-1]) # Target returns = Advantages + Value baseline
-
-        # --- Train agent in batches (optional - can train after each episode or mini-batches) ---
-        num_batches = len(episode_current_states) // batch_size
-        for batch_idx in range(num_batches):
-            start_idx = batch_idx * batch_size
-            end_idx = (batch_idx + 1) * batch_size
-            batch_current_states = current_states_batch[start_idx:end_idx]
-            batch_hist_states = hist_states_batch[start_idx:end_idx]
-            batch_actions = actions_batch[start_idx:end_idx]
-            batch_advantages = episode_rewards_gae[start_idx:end_idx]
-            batch_log_probs = log_probs_batch[start_idx:end_idx]
-            batch_returns = returns_batch[start_idx:end_idx]
-
-            actor_loss, critic_loss = agent.train_step((batch_current_states, batch_hist_states,), batch_actions, batch_advantages, batch_log_probs, batch_returns)
-            print(f"Episode {episode+1}, Batch {batch_idx+1}/{num_batches}, Actor Loss: {actor_loss.numpy():.4f}, Critic Loss: {critic_loss.numpy():.4f}")
-
-
         avg_reward = np.mean(episode_rewards)
-        print(f"Episode {episode+1}/{episodes}, Average Reward: {avg_reward:.4f}")
+        print(f"Episode {episode+1}/{episodes}, Average Reward: {avg_reward:.4f}, Portfolio Value: {env.get_current_portfolio_value():.2f}")
 
     # --- 5. Evaluation (Placeholder - Implement evaluation on test_data) ---
     # --- Evaluate trained agent on test_data and calculate performance metrics ---

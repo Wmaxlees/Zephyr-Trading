@@ -86,8 +86,8 @@ def get_coinbase_historical(symbol, start_date, end_date):
 start_date = '2020-01-01'
 end_date = '2024-12-31'
 
-data = get_coinbase_historical('BTC/USD', start_date, end_date)
+data = get_coinbase_historical('SOL/USD', start_date, end_date)
 if data is not None and not data.empty:
     print(f"\nData:\n{data.head()}")
-    data.to_csv("raw_data/btc.csv")
+    data.to_csv("raw_data/sol.csv")
 
