@@ -41,8 +41,8 @@ def split_data(data_dict, train_ratio=0.8):
 
     Returns:
         tuple: A tuple containing two dictionaries: (train_data_dict, val_data_dict).
-                Each dictionary has the same keys as the input, but the values are
-                the split DataFrames for training and validation, respectively.
+                 Each dictionary has the same keys as the input, but the values are
+                 the split DataFrames for training and validation, respectively.
     """
     train_data_dict = {}
     val_data_dict = {}
@@ -83,19 +83,22 @@ class PositionalEmbedding(tf.keras.layers.Layer):
 
 
 class CryptoTradingEnvironment:
-    def __init__(self, data, initial_capital=1000, n_days=5):
+    def __init__(self, data, initial_capital=1000, n_days=5, sharpe_window=30): # Added sharpe_window
         self.data = data # Preprocessed data
         self.coins = list(data.keys())
         self.initial_capital = initial_capital
         self.current_step = 0
         self.portfolio_value_history = []
         self.n_days = n_days
+        self.sharpe_window = sharpe_window # Window for Sharpe Ratio calculation
+        self.portfolio_returns = [] # Store portfolio returns for Sharpe Ratio calculation
 
     def reset(self):
-        self.current_step = random.randint(0, 30000)
+        self.current_step = random.randint(0, 10000)
         self.capital = self.initial_capital
         self.holdings = {coin: 0 for coin in self.coins} # Units held for each coin
         self.portfolio_value_history = [self.capital]
+        self.portfolio_returns = [] # Reset portfolio returns history at each reset
         return self._get_state()
 
     def _get_state(self):
@@ -228,10 +231,19 @@ class CryptoTradingEnvironment:
             next_price = self.data[coin].iloc[self.current_step]['close']
             next_portfolio_value += self.holdings[coin] * next_price
 
-        # 5. Calculate reward (log return)
+        # 5. Calculate reward (Sharpe Ratio)
         reward = 0.0
         if next_portfolio_value > 0 and current_portfolio_value > 0:
-            reward = np.log(next_portfolio_value / current_portfolio_value)
+            portfolio_return = (next_portfolio_value - current_portfolio_value) / current_portfolio_value
+            self.portfolio_returns.append(portfolio_return)
+
+            if len(self.portfolio_returns) >= self.sharpe_window:
+                returns_window = self.portfolio_returns[-self.sharpe_window:]
+                sharpe_ratio = np.mean(returns_window) / np.std(returns_window) if np.std(returns_window) != 0 else 0 # Handle case where std is zero
+                reward = sharpe_ratio
+            else:
+                reward = portfolio_return # Use simple return for initial steps before Sharpe window is full
+
 
         # 6. Check if episode is done
         done = self.current_step >= len(list(self.data.values())[0]) - 1 or next_portfolio_value == 0
@@ -509,6 +521,7 @@ if __name__ == '__main__':
     batch_size = 64  # Batch size for training updates
     buffer_capacity = 100000
     train_actor_every_step = 2 # Delayed actor updates
+    sharpe_window = 30 # Window size for Sharpe Ratio calculation
 
 
     # --- Get Data ---
@@ -517,7 +530,7 @@ if __name__ == '__main__':
     test_data = val_data
 
     # --- Environment and Agent Setup ---
-    env = CryptoTradingEnvironment(train_data, n_days=14)  # Use training data for environment
+    env = CryptoTradingEnvironment(train_data, n_days=14, sharpe_window=sharpe_window)  # Use training data for environment, pass sharpe_window
     current_state_dim = (9,)
     hist_state_dim = (14, 17*len(env.coins),)
     action_dim = len(env.coins) + 1
