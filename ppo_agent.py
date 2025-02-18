@@ -3,6 +3,8 @@ import pandas as pd
 import random
 import tensorflow as tf
 import tensorflow_probability as tfp
+import os  # Import os for directory operations
+import matplotlib.pyplot as plt  # Import matplotlib for charting
 
 def get_crypto_data():
     """
@@ -93,6 +95,9 @@ class CryptoTradingEnvironment:
         self.sharpe_window = sharpe_window # Window for Sharpe Ratio calculation
         self.portfolio_returns = [] # Store portfolio returns for Sharpe Ratio calculation
         self.slippage_factor = slippage_factor # Slippage factor for transaction cost simulation
+        self.bitcoin_value_history = []  # History of portfolio value if only holding Bitcoin
+        self.bitcoin_holdings = 0  # Units of Bitcoin held in baseline strategy
+        self.btc_coin_name = 'btc' # Assuming 'btc' is always in coins, for baseline comparison
 
     def reset(self):
         self.current_step = random.randint(0, 10000)
@@ -100,6 +105,13 @@ class CryptoTradingEnvironment:
         self.holdings = {coin: 0 for coin in self.coins} # Units held for each coin
         self.portfolio_value_history = [self.capital]
         self.portfolio_returns = [] # Reset portfolio returns history at each reset
+        self.bitcoin_value_history = [self.initial_capital] # Reset BTC baseline history
+
+        # Initialize Bitcoin baseline strategy
+        btc_price_initial = self.data[self.btc_coin_name].iloc[self.current_step]['close']
+        self.bitcoin_holdings = self.initial_capital / btc_price_initial if btc_price_initial > 0 else 0 # avoid division by zero
+
+
         return self._get_state()
 
     def _get_state(self):
@@ -255,6 +267,12 @@ class CryptoTradingEnvironment:
         info = {}
 
         self.portfolio_value_history.append(next_portfolio_value)
+
+        # --- Bitcoin Baseline Tracking ---
+        current_btc_price = self.data[self.btc_coin_name].iloc[self.current_step]['close']
+        bitcoin_portfolio_value = self.bitcoin_holdings * current_btc_price
+        self.bitcoin_value_history.append(bitcoin_portfolio_value)
+
 
         return next_state, reward, done, info
 
@@ -528,6 +546,14 @@ if __name__ == '__main__':
     train_actor_every_step = 2 # Delayed actor updates
     sharpe_window = 30 # Window size for Sharpe Ratio calculation
     slippage_factor = 0.01 # Slippage factor (e.g., 0.01 for 1% slippage) # New hyperparameter
+    model_save_interval = 50 # Save model every 50 episodes
+
+    # --- Directories for saving models and charts ---
+    model_save_dir = "saved_models"
+    chart_save_dir = "episode_charts"
+    os.makedirs(model_save_dir, exist_ok=True) # Create directory if it doesn't exist
+    os.makedirs(chart_save_dir, exist_ok=True) # Create directory if it doesn't exist
+
 
     # --- Get Data ---
     crypto_data = get_crypto_data()
@@ -547,6 +573,8 @@ if __name__ == '__main__':
     for episode in range(episodes):
         state = env.reset()
         episode_rewards = []
+        episode_portfolio_values = []
+        episode_bitcoin_values = []
 
         for timestep in range(timesteps_per_episode):
             action = agent.get_action(state)
@@ -562,6 +590,8 @@ if __name__ == '__main__':
 
             episode_rewards.append(reward)
             replay_buffer.record(state, state, action, reward, next_state, next_state, done) # Record experience
+            episode_portfolio_values.append(env.portfolio_value_history[-1]) # Record portfolio value
+            episode_bitcoin_values.append(env.bitcoin_value_history[-1]) # Record bitcoin value
 
 
             if replay_buffer.buffer_counter > batch_size: # Start training after buffer is filled a bit
@@ -576,6 +606,27 @@ if __name__ == '__main__':
 
         avg_reward = np.mean(episode_rewards)
         print(f"Episode {episode+1}/{episodes}, Average Reward: {avg_reward:.4f}, Portfolio Value: {env.get_current_portfolio_value():.2f}")
+
+        # --- Save Model Snapshot ---
+        if (episode + 1) % model_save_interval == 0:
+            agent.actor_model.save_weights(os.path.join(model_save_dir, f"actor_episode_{episode+1}.h5"))
+            agent.critic_model_1.save_weights(os.path.join(model_save_dir, f"critic_1_episode_{episode+1}.h5"))
+            agent.critic_model_2.save_weights(os.path.join(model_save_dir, f"critic_2_episode_{episode+1}.h5"))
+            print(f"Saved model snapshots at episode {episode+1}")
+
+        # --- Save Episode Chart ---
+        plt.figure(figsize=(12, 6))
+        plt.plot(episode_portfolio_values, label='TD3 Agent Portfolio Value')
+        plt.plot(episode_bitcoin_values, label='Hold Bitcoin Portfolio Value', linestyle='--')
+        plt.xlabel('Timestep')
+        plt.ylabel('Portfolio Value')
+        plt.title(f'Episode {episode+1} Portfolio Value Comparison')
+        plt.legend()
+        chart_path = os.path.join(chart_save_dir, f"episode_{episode+1}_chart.png")
+        plt.savefig(chart_path)
+        plt.close() # Close plot to prevent display and clear memory
+        print(f"Saved episode chart to {chart_path}")
+
 
     # --- 5. Evaluation (Placeholder - Implement evaluation on test_data) ---
     # --- Evaluate trained agent on test_data and calculate performance metrics ---
