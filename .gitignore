@@ -1,2 +1,6 @@
 .venv
 __pycache__
+
+# Models and analysis
+saved_models/
+episode_charts/

@@ -3,8 +3,8 @@ import pandas as pd
 import random
 import tensorflow as tf
 import tensorflow_probability as tfp
-import os  # Import os for directory operations
-import matplotlib.pyplot as plt  # Import matplotlib for charting
+import os
+import matplotlib.pyplot as plt
 
 def get_crypto_data():
     """
@@ -128,7 +128,9 @@ class CryptoTradingEnvironment:
             holdings_in_usd.append(self.holdings[coin] * df.iloc[self.current_step]['close'])
             historical_data.append(coin_state)
 
-        holdings_pct = holdings_in_usd / np.sum(holdings_in_usd)
+        holdings_pct = holdings_in_usd
+        if np.sum(holdings_in_usd) > 0:
+            holdings_pct = holdings_in_usd / np.sum(holdings_in_usd)
         current_state.extend(holdings_pct)
 
         # Concatenate states into a single tensor
@@ -546,7 +548,7 @@ if __name__ == '__main__':
     train_actor_every_step = 2 # Delayed actor updates
     sharpe_window = 30 # Window size for Sharpe Ratio calculation
     slippage_factor = 0.01 # Slippage factor (e.g., 0.01 for 1% slippage) # New hyperparameter
-    model_save_interval = 50 # Save model every 50 episodes
+    model_save_interval = 20 # Save model every 20 episodes
 
     # --- Directories for saving models and charts ---
     model_save_dir = "saved_models"
@@ -609,23 +611,23 @@ if __name__ == '__main__':
 
         # --- Save Model Snapshot ---
         if (episode + 1) % model_save_interval == 0:
-            agent.actor_model.save_weights(os.path.join(model_save_dir, f"actor_episode_{episode+1}.h5"))
-            agent.critic_model_1.save_weights(os.path.join(model_save_dir, f"critic_1_episode_{episode+1}.h5"))
-            agent.critic_model_2.save_weights(os.path.join(model_save_dir, f"critic_2_episode_{episode+1}.h5"))
+            agent.actor_model.save(os.path.join(model_save_dir, f"actor_episode_{episode+1}.keras"))
+            agent.critic_model_1.save(os.path.join(model_save_dir, f"critic_1_episode_{episode+1}.keras"))
+            agent.critic_model_2.save(os.path.join(model_save_dir, f"critic_2_episode_{episode+1}.keras"))
             print(f"Saved model snapshots at episode {episode+1}")
 
-        # --- Save Episode Chart ---
-        plt.figure(figsize=(12, 6))
-        plt.plot(episode_portfolio_values, label='TD3 Agent Portfolio Value')
-        plt.plot(episode_bitcoin_values, label='Hold Bitcoin Portfolio Value', linestyle='--')
-        plt.xlabel('Timestep')
-        plt.ylabel('Portfolio Value')
-        plt.title(f'Episode {episode+1} Portfolio Value Comparison')
-        plt.legend()
-        chart_path = os.path.join(chart_save_dir, f"episode_{episode+1}_chart.png")
-        plt.savefig(chart_path)
-        plt.close() # Close plot to prevent display and clear memory
-        print(f"Saved episode chart to {chart_path}")
+            # --- Save Episode Chart ---
+            plt.figure(figsize=(12, 6))
+            plt.plot(episode_portfolio_values, label='TD3 Agent Portfolio Value')
+            plt.plot(episode_bitcoin_values, label='Hold Bitcoin Portfolio Value', linestyle='--')
+            plt.xlabel('Timestep')
+            plt.ylabel('Portfolio Value')
+            plt.title(f'Episode {episode+1} Portfolio Value Comparison')
+            plt.legend()
+            chart_path = os.path.join(chart_save_dir, f"episode_{episode+1}_chart.png")
+            plt.savefig(chart_path)
+            plt.close() # Close plot to prevent display and clear memory
+            print(f"Saved episode chart to {chart_path}")
 
 
     # --- 5. Evaluation (Placeholder - Implement evaluation on test_data) ---
