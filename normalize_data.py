@@ -51,6 +51,8 @@ def preprocess_financial_data(df, fill_method='mean', diff_order=1):
 
     price_cols = ['open', 'high', 'low', 'close']
     for price_col in price_cols:
+        log_return = np.log(df[price_col]).diff(periods=1)
+        df[f'{price_col}_log_return'] = log_return
         log_price = np.log(df[price_col])
         diff = log_price.diff(periods=diff_order)
         scaler = StandardScaler()
@@ -58,6 +60,7 @@ def preprocess_financial_data(df, fill_method='mean', diff_order=1):
 
     # --- Log Transformation (Volume) ---
     log_volume = np.log(df['volume'])
+    df['volume_log'] = log_volume
     scaler = StandardScaler()
     df['volume_norm'] = scaler.fit_transform(log_volume.values.reshape(-1, 1))
 
@@ -65,6 +68,7 @@ def preprocess_financial_data(df, fill_method='mean', diff_order=1):
     indicator_cols = [col for col in df.columns
                       if col not in ['timestamp', 'open', 'high', 'low', 'close', 'volume']]
     for indicator_col in indicator_cols:
+        df[f'{indicator_col}_pct_change'] = df[indicator_col].pct_change(periods=1)
         scaler = StandardScaler()
         df[f'{indicator_col}_norm'] = scaler.fit_transform(df[indicator_col].values.reshape(-1, 1))
 
@@ -110,8 +114,8 @@ def process_csv(input_csv_path, output_csv_path):
 
 # --- Example Usage (with provided data) ---
 if __name__ == '__main__':
-    input_file = 'augmented_data/sol.csv'
-    output_file = 'normalized_data/sol.csv'
+    input_file = 'augmented_data/btc.csv'
+    output_file = 'normalized_data/btc.csv'
 
     process_csv(input_file, output_file)
 
